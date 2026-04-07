@@ -1,3 +1,4 @@
+import { upsertStreamUser } from "../lib/stream.js";
 import User from "../models/User.js";
 import jwt from "jsonwebtoken";
 
@@ -24,9 +25,11 @@ export async function signup(req, res) {
             return res.status(400).json({ message: "Email already in use, please use a different one" });
         }
 
+        // Generate random avatar using DiceBear API
         const idx = Math.floor(Math.random() * 100) + 1; // Random number between 1 and 100
         const randomAvatar = `https://api.dicebear.com/7.x/bottts/svg?seed=${idx}.png`;
 
+        // Create user in MongoDB
         const newUser = await User.create({
             email,
             password,
@@ -34,6 +37,21 @@ export async function signup(req, res) {
             profilePic: randomAvatar,
         });
 
+        // Upsert user in Stream Chat
+        try {
+            await upsertStreamUser({
+                id: newUser._id.toString(),
+                name: newUser.fullName,
+                image: newUser.profilePic || ""
+            });
+            console.log(`Stream user upserted/created/updated for ${newUser.fullName}`);
+
+        } catch (error) {
+            console.log("Error in upserting/creating Stream user", error);
+
+        }
+
+        // Generate JWT token
         const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET_KEY, { expiresIn: "7d" });
 
         res.cookie("jwt", token, {
@@ -69,7 +87,7 @@ export async function login(req, res) {
         const isPasswordCorrect = await user.matchPassword(password);
         if (!isPasswordCorrect) return res.status(401).json({ message: "Invalid email or password" });
 
-        const token = jwt.sign({ userId: newUser._id }, process.env.JWT_SECRET_KEY, { expiresIn: "7d" });
+        const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET_KEY, { expiresIn: "7d" });
         res.cookie("jwt", token, {
             maxAge: 7 * 24 * 60 * 60 * 1000,
             httpOnly: true, //prevent XSS attacks
@@ -90,5 +108,56 @@ export async function login(req, res) {
 }
 
 export function logout(req, res) {
-    res.send("Logout Router")
+    res.clearCookie("jwt");
+    res.status(200).json({ success: true, message: "Logout successful" });
+}
+
+export async function onboard(req, res) {
+    try {
+        const userId = req.user._id;
+        const { fullName, bio, nativeLanguage, learningLanguage, location } = req.body;
+
+        if (!fullName || !bio || !nativeLanguage || !learningLanguage || !location) {
+            return res.status(400).json({
+                message: "All fields are required",
+                missingFields: [
+                    !fullName && "fullName",
+                    !bio && "bio",
+                    !nativeLanguage && "nativeLanguage",
+                    !learningLanguage && "learningLanguage",
+                    !location && "location"
+                ].filter(Boolean) // Remove falsy values
+            });
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(userId, {
+            ...req.body,
+            isOnboarded: true,
+        }, { new: true });
+
+        if (!updatedUser) return res.status(404).json({ message: "User not found" });
+
+        try {
+            await upsertStreamUser({
+                id: updatedUser._id.toString(),
+                name: updatedUser.fullName,
+                image: updatedUser.profilePic || ""
+            });
+
+            console.log(`Stream user upserted/created/updated for ${updatedUser.fullName} during onboarding`);
+        }
+        catch (streamError) {
+
+            console.log("Error in upserting/creating Stream user during onboarding", streamError.message);
+        }
+
+        res.status(200).json({
+            success: true,
+            user: updatedUser,
+        });
+    }
+    catch (error) {
+        console.log("Error in onboarding controller", error);
+        res.status(500).json({ message: "Internal Server Error" });
+    }
 }
